@@ -4,18 +4,77 @@ inputs:
   env_vars_filepath:
     description: "Path to the env_by_branch.sh file"
     required: true
-  
-  
+  vault_sf_cred_path:
+    description: "Path in Vault to the SF username & password"
+    required: true
   
 runs:
   using: "composite"
   steps:
     - name: Checkout
       uses: actions/checkout@v2
-    - id: CI
+    - id: ci
       name: Set up variables by branch
       env:
         MERGE_TARGET: ${{ github.event.pull_request.base.ref }}
       run: sh ${{ inputs.env_vars_filepath }}
     - name: Remove namespace env var
       run: echo NAMESPACE="" >> $GITHUB_ENV
+    - id: oidc
+      name: Authenticate with Vault
+      uses: colpal/actions-google-sa-to-oidc@v1
+      with:
+        sa_key: ${{ secrets.VAULT_IAP_SA }}
+        target_audience: ${{ secrets.VAULT_IAP_CLIENT_ID }}
+    - id: vault
+      name: Get secrets from Vault
+      uses: hashicorp/vault-action@v2.1.0
+      with:
+        url: https://public.vault.colpal.cloud # COPY
+        method: approle
+        roleId: ${{ steps.ci.outputs.VAULT_ROLE_ID }}
+        secretId: ${{ secrets.VAULT_SECRET_ID }}
+        exportEnv: false
+        extraHeaders: "Authorization: Bearer ${{ steps.oidc.outputs.token }}"
+        secrets: |
+            ${{ inputs.vault_sf_cred_path }} username;
+            ${{ inputs.vault_sf_cred_path }} password;
+    - id: pyinit
+      name: Initialize Python
+      uses: actions/setup-python@v1
+      with:
+        python-version: "3.8.x"
+    - id: init_dbt
+      name: Initialize DBT
+      run: pip3 install dbt==0.20.2
+    - id: version_dbt
+      name: Get DBT version
+      run: dbt --version &> version.txt
+    - id: ls
+      name: Check working directory
+      working-directory: ./dbt
+      run: ls
+    - id: deps_dbt
+      name: Install DBT dependencies
+      working-directory: ./dbt
+      run: dbt deps
+    - id: debug_dbt
+      name: DBT Debug
+      working-directory: ./dbt
+      run: dbt debug --config-dir
+    - id: seed
+      name: DBT validation seed
+      if: ${{ github.event_name == 'pull_request' }}
+      working-directory: ./dbt
+      env:
+        SF_ACCOUNT: ${{ steps.ci.outputs.SF_ACCOUNT}}
+        SF_USERNAME: ${{ steps.vault.outputs.username }}
+        SF_PASSWORD: ${{ steps.vault.outputs.password }}
+        SF_DATABASE: ${{ steps.ci.outputs.DEV_SF_DATABASE_PD}}
+        SF_ROLE: ${{ steps.ci.outputs.DEV_SF_ROLE}}
+        SF_WAREHOUSE: ${{ steps.ci.outputs.DEV_SF_WAREHOUSE}}
+        SF_SCHEMA: "DBT_PR_${{ github.event.number }}"
+      run: |
+        dbt seed --profiles-dir . --target dev | tee -a seed.txt
+        tail -n 1 seed.txt > seed-tail.txt
+      continue-on-error: true ******** GITHUB COMPOSITE ACTION CURRENTLY DOES NOT SUPPORT CONTINUE-ON-ERROR
