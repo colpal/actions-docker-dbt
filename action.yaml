@@ -1,6 +1,21 @@
 name: DBT
 description:
 inputs:
+  env_vars_filepath:
+    description: "Path to the env_by_branch.sh file"
+    required: true
+  
+  
   
 runs:
-  
+  using: "composite"
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+    - id: CI
+      name: Set up variables by branch
+      env:
+        MERGE_TARGET: ${{ github.event.pull_request.base.ref }}
+      run: sh ${{ inputs.env_vars_filepath }}
+    - name: Remove namespace env var
+      run: echo NAMESPACE="" >> $GITHUB_ENV
