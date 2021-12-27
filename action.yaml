@@ -44,25 +44,25 @@ runs:
       uses: actions/setup-python@v1
       with:
         python-version: "3.8.x"
-    - id: init_dbt
+    - id: dbt_init
       name: Initialize DBT
       run: pip3 install dbt==0.20.2
-    - id: version_dbt
+    - id: dbt_version
       name: Get DBT version
       run: dbt --version &> version.txt
     - id: ls
       name: Check working directory
       working-directory: ./dbt
       run: ls
-    - id: deps_dbt
+    - id: dbt_deps
       name: Install DBT dependencies
       working-directory: ./dbt
       run: dbt deps
-    - id: debug_dbt
+    - id: dbt_debug
       name: DBT Debug
       working-directory: ./dbt
       run: dbt debug --config-dir
-    - id: seed
+    - id: dbt_seed
       name: DBT validation seed
       if: ${{ github.event_name == 'pull_request' }}
       working-directory: ./dbt
@@ -77,4 +77,84 @@ runs:
       run: |
         dbt seed --profiles-dir . --target dev | tee -a seed.txt
         tail -n 1 seed.txt > seed-tail.txt
-      continue-on-error: true ******** GITHUB COMPOSITE ACTION CURRENTLY DOES NOT SUPPORT CONTINUE-ON-ERROR
+      continue-on-error: true
+    - id: dbt_run
+      name: DBT validation run
+      if: ${{ github.event_name == 'pull_request' }}
+      env:
+        SF_ACCOUNT: ${{ steps.ci.outputs.SF_ACCOUNT}}
+        SF_USERNAME: ${{ steps.vault.outputs.username }}
+        SF_PASSWORD: ${{ steps.vault.outputs.password }}
+        SF_DATABASE: ${{ steps.ci.outputs.DEV_SF_DATABASE_PD}}
+        SF_ROLE: ${{ steps.ci.outputs.DEV_SF_ROLE}}
+        SF_WAREHOUSE: ${{ steps.ci.outputs.DEV_SF_WAREHOUSE}}
+        SF_SCHEMA: "DBT_PR_${{ github.event.number }}"
+      run: |
+        dbt run --profiles-dir . --target dev | tee -a run.txt
+        tail -n 1 run.txt > run-tail.txt
+      continue-on-error: true
+    - id: dbt_test
+      name: DBT validation test
+      if: ${{ github.event_name == 'pull_request' }}
+      env:
+        SF_ACCOUNT: ${{ steps.ci.outputs.SF_ACCOUNT}}
+        SF_USERNAME: ${{ steps.vault.outputs.username }}
+        SF_PASSWORD: ${{ steps.vault.outputs.password }}
+        SF_DATABASE: ${{ steps.ci.outputs.DEV_SF_DATABASE_PD}}
+        SF_ROLE: ${{ steps.ci.outputs.DEV_SF_ROLE}}
+        SF_WAREHOUSE: ${{ steps.ci.outputs.DEV_SF_WAREHOUSE}}
+        SF_SCHEMA: "DBT_PR_${{ github.event.number }}"
+      run: |
+        dbt test --profiles-dir . --target dev | tee -a test.txt
+        tail -n 1 test.txt > test-tail.txt
+      continue-on-error: true
+    - id: capture_tails.  # what does this do?
+      run: |
+    - id: comment
+      name: Update pull request
+      uses: actions/github-script@0.9.0
+      if: ${{ github.event_name == 'pull_request' }}
+      env:
+        RUN: "${{ steps.dbt_run.outputs.stdout }}"
+        TEST: "${{ steps.dbt_test.outputs.stdout }}"
+        VERSION: "${{ steps.dbt_version.outputs.stdout }}"
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs').promises;
+          let output = `## DBT Pre-Deployment Validation\n`;
+          if ("${{ steps.dbt_version.outcome }}" == 'success') {
+            output += `#### DBT Version
+            \n\`\`\`\n ${await fs.readFile("./version.txt", "utf8")} \n\`\`\`\n`;
+          } else {
+            output += '#### DBT Initialization Failed';
+          }
+          if ("${{ steps.dbt_seed.conclusion }}" == 'success') {
+            output += `\n### DBT Seed Status 🖌 \`${{ steps.dbt_seed.outcome }}\`
+            <details><summary>${await fs.readFile("./dbt/seed-tail.txt", "utf8")}</summary>
+            \n\`\`\`\n ${await fs.readFile("./dbt/seed.txt", "utf8")} \n\`\`\`\n 
+            </details>\n`;
+          }
+          if ("${{ steps.dbt_run.conclusion }}" == 'success') {
+            output += `\n### DBT Run Status 🖌 \`${{ steps.dbt_run.outcome }}\`
+            <details><summary>${await fs.readFile("./dbt/run-tail.txt", "utf8")}</summary>
+            \n\`\`\`\n ${await fs.readFile("./dbt/run.txt", "utf8")} \n\`\`\`\n 
+            </details>\n`;
+          }
+          if ("${{ steps.dbt_test.conclusion }}" == 'success') {
+            output += `\n### DBT Test Status 📖 \`${{ steps.dbt_test.outcome }}\`
+            <details><summary>${await fs.readFile("./dbt/test-tail.txt", "utf8")}</summary>
+            \n\`\`\`\n ${await fs.readFile("./dbt/test.txt", "utf8")} \n\`\`\`\n 
+            </details>\n`;
+          }
+          output += `\n*Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`
+            
+          github.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
+    - name: Check validation status
+      if: ${{ steps.dbt_test.outcome == 'failure' || steps.dbt_run.outcome == 'failure' }}
+      run: exit 1
